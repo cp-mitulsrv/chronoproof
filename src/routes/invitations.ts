@@ -5,6 +5,8 @@ import { sql, getPool, withTransaction } from "../db/pool.js";
 import { requireAuth, requireWorkspaceRole } from "../middleware/auth.js";
 import { hashPassword } from "../services/passwordService.js";
 import { findUserByEmail } from "../db/repo.js";
+import { sendInvitationEmail } from "../services/emailService.js";
+import config from "../config/index.js";
 
 const router = express.Router();
 
@@ -42,7 +44,29 @@ router.post(
           `INSERT INTO dbo.invitations (workspace_id, email, role, token_hash, expires_at)
            VALUES (@wid, @email, @role, @hash, @exp)`
         );
-      return res.status(201).json({ invitation: { email, role, token, expiresAt } });
+
+      // Friendlier email: include the workspace name (best-effort lookup).
+      const wsName = (
+        await pool
+          .request()
+          .input("wid", sql.UniqueIdentifier, req.params.id)
+          .query<{ name: string }>(`SELECT name FROM dbo.workspaces WHERE id = @wid`)
+      ).recordset[0]?.name;
+
+      const acceptUrl = `${config.appBaseUrl.replace(/\/$/, "")}/accept-invite?token=${token}`;
+      const emailSent = await sendInvitationEmail({
+        to: email as string,
+        role: role as string,
+        acceptUrl,
+        workspaceName: wsName,
+      });
+
+      return res.status(201).json({
+        invitation: { email, role, expiresAt, emailSent },
+        // If email couldn't be delivered (SMTP off/failed), return the link + token
+        // so the owner can share it manually. When emailed, we don't leak the token.
+        ...(emailSent ? {} : { acceptUrl, token }),
+      });
     } catch (err) {
       next(err);
     }

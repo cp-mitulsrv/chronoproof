@@ -23,6 +23,8 @@ export interface AppConfig {
   jwt: { keyId: string; privateKey: string | null; publicKey: string | null };
   cookieDomain: string | undefined;
   corsAllowedOrigins: string[];
+  smtp: { host: string; port: number; secure: boolean; user: string; password: string; from: string };
+  appBaseUrl: string;
 }
 
 // .env stores PEMs single-line with literal "\n"; restore real newlines here.
@@ -106,6 +108,18 @@ const config: AppConfig = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+
+  smtp: {
+    host: process.env.SMTP_HOST || "",
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: Number(process.env.SMTP_PORT || 587) === 465, // 465=implicit TLS, 587=STARTTLS
+    user: process.env.SMTP_USERNAME || "",
+    password: process.env.SMTP_PASSWORD || "",
+    from: process.env.EMAIL_FROM || "ChronoProof <noreply@chronoproof.com>",
+  },
+  // Frontend base for the invite accept link. Falls back to the email-verification URL.
+  appBaseUrl:
+    process.env.APP_BASE_URL || process.env.EMAIL_VERIFICATION_FRONTEND_URL || "http://localhost:3000",
 };
 
 export default config;
