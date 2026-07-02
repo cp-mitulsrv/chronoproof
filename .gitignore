@@ -8,3 +8,4 @@ keys/*.pem
 coverage/
 .superpowers/
 .azure/
+docs/

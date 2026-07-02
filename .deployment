@@ -1,6 +1,7 @@
 [config]
-SCM_DO_BUILD_DURING_DEPLOYMENT=true
-; Startup Command must be: bun run src/server.ts
-; NOTE: Azure App Service does NOT ship Bun natively. You must either:
-;   1. Use a startup script that installs Bun first (e.g., curl -fsSL https://bun.sh/install | bash && bun run src/server.ts)
-;   2. Use a custom container that includes Bun
+; CI ships node_modules, so Oryx must NOT run its own build.
+SCM_DO_BUILD_DURING_DEPLOYMENT=false
+; App Service Startup Command must be:  bash startup.sh
+; startup.sh installs Bun once into the persistent /home/.bun (survives restarts,
+; shared across instances) and runs `bun run src/server.ts`. No Docker required.
+; NOTE: Azure App Service does NOT ship Bun natively — that is what startup.sh handles.
