@@ -1,0 +1,42 @@
+{
+  "name": "chronoproof",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ChronoProof identity hub — centralized authentication (RS256 JWT + JWKS) for the Chrono product suite. Express + Bun + Azure SQL.",
+  "main": "src/server.ts",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "migrate": "bun run src/db/migrate.ts",
+    "build": "bun build src/server.ts --outdir dist --target bun",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mssql": "^11.0.1",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/mssql": "^12.3.0",
+    "@types/node": "^20.0.0",
+    "@types/supertest": "^6.0.2",
+    "@types/swagger-ui-express": "^4.1.7",
+    "bun-types": "latest",
+    "supertest": "^7.0.0",
+    "typescript": "^5.3.0"
+  }
+}
