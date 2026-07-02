@@ -1,147 +1,87 @@
-name: ChronoProof — Deploy & Migrate
+# Build and deploy ChronoProof (Bun + Express) to Azure Web App - chrprai
+# Modeled on Azure's generated workflow, adapted from Python to Bun.
 
-# One workflow does both:
-#   push develop           -> deploy to development
-#   push main              -> deploy to production
-#   Run workflow (manual)  -> pick job (deploy | migrate | deploy-then-migrate)
-#                             and environment (development | staging | production)
+name: Build and deploy ChronoProof to Azure Web App - chrprai
 
 on:
   push:
-    branches: [develop, main]
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      job:
-        description: "What to run"
-        type: choice
-        required: true
-        default: deploy
-        options: [deploy, migrate, deploy-then-migrate]
-      environment:
-        description: "Target environment"
-        type: choice
-        required: true
-        default: development
-        options: [development, staging, production]
-
-concurrency:
-  group: chronoproof-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
-  # Resolve the target environment ONCE (env context can't be used in
-  # `environment:`/`if:`, so we expose it as a job output instead).
-  setup:
-    name: Resolve environment
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      target_env: ${{ steps.resolve.outputs.target_env }}
+    permissions:
+      contents: read # required for actions/checkout
+
     steps:
-      - id: resolve
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The token/JWKS tests need an RS256 keypair. keys/ is gitignored, so
+      # generate an EPHEMERAL pair for the test run only (never deployed).
+      - name: Generate ephemeral RSA keys (test-only)
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-              echo "target_env=production" >> "$GITHUB_OUTPUT"
-            else
-              echo "target_env=development" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "target_env=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
-          fi
+          mkdir -p keys
+          openssl genrsa -out keys/private.pem 2048
+          openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 
-  # CI runs for any deploy path (skipped for a migrate-only manual run).
-  ci:
-    name: Typecheck + tests
-    needs: [setup]
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'push' ||
-      inputs.job == 'deploy' ||
-      inputs.job == 'deploy-then-migrate'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun test
+      - name: Typecheck
+        run: bunx tsc --noEmit
 
-  deploy:
-    name: Deploy → ${{ needs.setup.outputs.target_env }}
-    needs: [setup, ci]
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'push' ||
-      inputs.job == 'deploy' ||
-      inputs.job == 'deploy-then-migrate'
-    environment: ${{ needs.setup.outputs.target_env }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - name: Install production dependencies
+      - name: Test
+        run: bun test
+
+      # Ship node_modules (App Service does not build Bun). Prune devDependencies
+      # first so the artifact is production-only.
+      - name: Prune to production dependencies
         run: bun install --frozen-lockfile --production
-      - name: Assemble deploy package (no keys/tests/docs/.git)
+
+      - name: Assemble deployment artifact (no keys/tests/docs/.git)
         run: |
           rm -rf deploy && mkdir -p deploy
           cp -r src package.json bun.lock startup.sh node_modules deploy/
           chmod +x deploy/startup.sh
-      - name: Deploy to Azure App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          # Defaults to your app "chronoproofsaas"; override per-environment
-          # with vars.AZURE_WEBAPP_NAME / vars.AZURE_WEBAPP_SLOT.
-          app-name: ${{ vars.AZURE_WEBAPP_NAME || 'chronoproofsaas' }}
-          slot-name: ${{ vars.AZURE_WEBAPP_SLOT || 'production' }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          package: deploy
-      - name: Smoke test (/health + JWKS)
-        run: |
-          APP="${{ vars.AZURE_WEBAPP_NAME || 'chronoproofsaas' }}"
-          URL="https://${APP}.azurewebsites.net"
-          if [ -n "${{ vars.AZURE_WEBAPP_SLOT }}" ] && [ "${{ vars.AZURE_WEBAPP_SLOT }}" != "production" ]; then
-            URL="https://${APP}-${{ vars.AZURE_WEBAPP_SLOT }}.azurewebsites.net"
-          fi
-          echo "Smoke testing $URL (retrying through cold start + first Bun install)"
-          curl -sf --retry 20 --retry-all-errors --retry-delay 6 "$URL/health" | grep -q '"status":"ok"' && echo "✓ /health"
-          curl -sf --retry 6 --retry-all-errors --retry-delay 3 "$URL/.well-known/jwks.json" | grep -q '"alg":"RS256"' && echo "✓ JWKS"
 
-  # Migrations run only on a MANUAL trigger (never auto on push), either
-  # standalone (job=migrate) or right after deploy (job=deploy-then-migrate).
-  migrate:
-    name: Migrate → ${{ needs.setup.outputs.target_env }}
-    needs: [setup, deploy]
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronoproof-app
+          path: deploy
+
+  deploy:
     runs-on: ubuntu-latest
-    if: >-
-      always() &&
-      (inputs.job == 'migrate' || inputs.job == 'deploy-then-migrate') &&
-      (needs.deploy.result == 'success' || inputs.job == 'migrate')
-    environment: ${{ needs.setup.outputs.target_env }}
+    needs: build
+    permissions:
+      id-token: write # required for OIDC (azure/login)
+      contents: read
+
     steps:
-      - name: Run migration inside the app container (Kudu)
-        # Runs `bun run src/db/migrate.ts` INSIDE the App Service container via
-        # the Kudu command API, so no SQL firewall rule / dynamic-IP problem.
-        # PREREQUISITES on the target app (else this 401s or can't see the DB):
-        #   1) SCM Basic Auth = ON  (App Service → Configuration → General
-        #      settings → "SCM Basic Auth Publishing Credentials"). Azure turns
-        #      this OFF by default on new apps.
-        #   2) The app has started at least once, so /home/.bun exists and the
-        #      App Settings (incl. AZURE_SQL_CONNECTION_STRING) are in-container.
-        # Migrations are idempotent — if this doesn't fit your setup, just run
-        # once from App Service SSH:  bun run src/db/migrate.ts
-        run: |
-          PROFILE='${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}'
-          KUDU_URL=$(echo "$PROFILE" | grep -oP 'publishUrl="\K[^"]+' | grep -i scm | head -1 | sed 's|:443||')
-          KUDU_USER=$(echo "$PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
-          KUDU_PASS=$(echo "$PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
-          echo "::add-mask::$KUDU_PASS"
-          if [ -z "$KUDU_URL" ]; then echo "No SCM URL in publish profile"; exit 1; fi
-          echo "Running migration on https://$KUDU_URL ..."
-          RESPONSE=$(curl -sS -u "$KUDU_USER:$KUDU_PASS" -H "Content-Type: application/json" \
-            -d '{"command":"export BUN_INSTALL=/home/.bun && export PATH=$BUN_INSTALL/bin:$PATH && cd /home/site/wwwroot && bun run src/db/migrate.ts","dir":"/home/site/wwwroot"}' \
-            "https://$KUDU_URL/api/command")
-          echo "$RESPONSE"
-          EXIT=$(echo "$RESPONSE" | grep -oP '"ExitCode":\s*\K[0-9]+' | head -1 || echo 1)
-          if [ "$EXIT" = "0" ]; then echo "✓ migration OK"; else echo "migration failed (exit $EXIT)"; exit 1; fi
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: chronoproof-app
+          path: .
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_BC24BFC093DC4D37AF742B0360CC58F1 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_330E59F41C4346FBA33D3463F80840EC }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_58E4CE3CD8E2404582F41322E8ED0C53 }}
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        id: deploy-to-webapp
+        with:
+          app-name: 'chrprai'
+          slot-name: 'Production'
+          package: .
