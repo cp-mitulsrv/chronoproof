@@ -10,3 +10,4 @@ coverage/
 .azure/
 docs/keys/
 docs/
+test-frontend/

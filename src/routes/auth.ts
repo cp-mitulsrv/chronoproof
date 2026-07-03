@@ -16,14 +16,17 @@ function setRefreshCookie(res: Response, token: string): void {
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
     secure: true,
-    sameSite: "lax",
+    // "none" so the browser sends the refresh cookie on cross-origin fetch()
+    // from the frontend (different origin than the API). Requires secure:true.
+    sameSite: "none",
     domain: config.cookieDomain,
     path: "/auth",
     maxAge: config.refreshTokenTtlDays * 24 * 60 * 60 * 1000,
   });
 }
 function clearRefreshCookie(res: Response): void {
-  res.clearCookie(REFRESH_COOKIE, { domain: config.cookieDomain, path: "/auth" });
+  // Match the set attributes so logout reliably clears it in modern browsers.
+  res.clearCookie(REFRESH_COOKIE, { domain: config.cookieDomain, path: "/auth", secure: true, sameSite: "none" });
 }
 
 async function issueSession(
