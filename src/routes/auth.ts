@@ -4,35 +4,51 @@ import { sql, withTransaction } from "../db/pool.js";
 import { hashPassword, verifyPassword, needsRehash } from "../services/passwordService.js";
 import { signAccessToken } from "../services/tokenService.js";
 import * as sessionService from "../services/sessionService.js";
-import { findUserByEmail, listUserWorkspaces, getWorkspaceMembership } from "../db/repo.js";
+import {
+  findUserByEmail,
+  findUserById,
+  findUserByUsername,
+  findUserByIdentifier,
+  listUserWorkspaces,
+  getWorkspaceMembership,
+} from "../db/repo.js";
 import { requireAuth } from "../middleware/auth.js";
 import config from "../config/index.js";
 import { getPool } from "../db/pool.js";
 
 const router = express.Router();
 const REFRESH_COOKIE = "chrono_refresh";
+// Username: 3-30 chars, lowercase letters/numbers/underscore. Login handle + display.
+const USERNAME_RE = /^[a-z0-9_]{3,30}$/;
 
-function setRefreshCookie(res: Response, token: string): void {
+// Cookie security flags depend on the connection. Over HTTPS (production, possibly
+// cross-domain) use SameSite=None + Secure. Over plain HTTP (local dev) the browser
+// won't SEND a Secure cookie, so fall back to Lax + insecure (localhost is same-site).
+function cookieFlags(req: Request): { secure: boolean; sameSite: "none" | "lax" } {
+  const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+  return isHttps ? { secure: true, sameSite: "none" } : { secure: false, sameSite: "lax" };
+}
+
+function setRefreshCookie(req: Request, res: Response, token: string): void {
+  const { secure, sameSite } = cookieFlags(req);
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
-    secure: true,
-    // "none" so the browser sends the refresh cookie on cross-origin fetch()
-    // from the frontend (different origin than the API). Requires secure:true.
-    sameSite: "none",
+    secure,
+    sameSite,
     domain: config.cookieDomain,
     path: "/auth",
     maxAge: config.refreshTokenTtlDays * 24 * 60 * 60 * 1000,
   });
 }
-function clearRefreshCookie(res: Response): void {
-  // Match the set attributes so logout reliably clears it in modern browsers.
-  res.clearCookie(REFRESH_COOKIE, { domain: config.cookieDomain, path: "/auth", secure: true, sameSite: "none" });
+function clearRefreshCookie(req: Request, res: Response): void {
+  const { secure, sameSite } = cookieFlags(req);
+  res.clearCookie(REFRESH_COOKIE, { domain: config.cookieDomain, path: "/auth", secure, sameSite });
 }
 
 async function issueSession(
   res: Response,
   req: Request,
-  params: { userId: string; tenantId: string; workspaceId: string; role: "owner" | "member"; orgRole: "owner" | "admin" | "member" }
+  params: { userId: string; tenantId: string; workspaceId: string; role: "owner" | "member"; orgRole: "owner" | "admin" | "member"; username?: string | null; email?: string | null; name?: string | null }
 ): Promise<string> {
   const { sessionId, refreshToken } = await sessionService.createSession({
     userId: params.userId,
@@ -40,7 +56,7 @@ async function issueSession(
     deviceLabel: (req.headers["user-agent"] || "").slice(0, 200) || null,
     ipAddress: req.ip ?? null,
   });
-  setRefreshCookie(res, refreshToken);
+  setRefreshCookie(req, res,refreshToken);
   return signAccessToken({ ...params, sessionId });
 }
 
@@ -53,14 +69,23 @@ function slugify(name: string): string {
 // caller becomes org owner AND workspace owner. Atomic.
 router.post("/register", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password, name, organizationName, workspaceName } = req.body || {};
+    const { email, password, name, username, organizationName, workspaceName } = req.body || {};
     if (!email || !password || !name || !organizationName) {
       return res
         .status(400)
         .json({ message: "email, password, name and organizationName are required" });
     }
+    const uname = typeof username === "string" ? username.trim().toLowerCase() : "";
+    if (!USERNAME_RE.test(uname)) {
+      return res.status(400).json({
+        message: "username is required: 3-30 chars, lowercase letters, numbers, or underscore",
+      });
+    }
     if (await findUserByEmail(email)) {
       return res.status(409).json({ message: "Email already registered" });
+    }
+    if (await findUserByUsername(uname)) {
+      return res.status(409).json({ message: "Username already taken" });
     }
     const passwordHash = await hashPassword(password as string);
 
@@ -69,7 +94,8 @@ router.post("/register", async (req: Request, res: Response, next: NextFunction)
         .input("email", sql.NVarChar(320), email)
         .input("hash", sql.NVarChar(sql.MAX), passwordHash)
         .input("name", sql.NVarChar(200), name)
-        .query<{ id: string }>(`INSERT INTO dbo.users (email, password_hash, name) OUTPUT INSERTED.id VALUES (@email, @hash, @name)`);
+        .input("username", sql.NVarChar(50), uname)
+        .query<{ id: string }>(`INSERT INTO dbo.users (email, password_hash, name, username) OUTPUT INSERTED.id VALUES (@email, @hash, @name, @username)`);
       const userId = u.recordset[0].id;
 
       const t = await new sql.Request(tx)
@@ -102,11 +128,14 @@ router.post("/register", async (req: Request, res: Response, next: NextFunction)
       workspaceId: created.workspaceId,
       role: "owner",
       orgRole: "owner",
+      username: uname,
+      email,
+      name,
     });
     return res.status(201).json({
       accessToken,
-      user: { id: created.userId, email, name },
-      tenant: { id: created.tenantId, name: organizationName },
+      user: { id: created.userId, email, name, username: uname },
+      organization: { id: created.tenantId, name: organizationName },
       workspace: { id: created.workspaceId, name: workspaceName || "Default" },
       role: "owner",
       orgRole: "owner",
@@ -119,13 +148,15 @@ router.post("/register", async (req: Request, res: Response, next: NextFunction)
 // POST /auth/login — password check + workspace selection.
 router.post("/login", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password: passwordInput, workspaceId } = req.body || {};
-    if (!email || !passwordInput) {
-      return res.status(400).json({ message: "email and password are required" });
+    const { email, identifier, username, password: passwordInput, workspaceId } = req.body || {};
+    // Accept `identifier` (email OR username); keep `email`/`username` for back-compat.
+    const idf = (identifier ?? email ?? username ?? "").toString().trim();
+    if (!idf || !passwordInput) {
+      return res.status(400).json({ message: "identifier (email or username) and password are required" });
     }
-    const user = await findUserByEmail(email as string);
+    const user = await findUserByIdentifier(idf);
     const ok = user && (await verifyPassword(passwordInput as string, user.password_hash));
-    if (!ok) return res.status(401).json({ message: "Email or password is incorrect" });
+    if (!ok) return res.status(401).json({ message: "Email/username or password is incorrect" });
 
     // Migrate legacy scrypt hash to argon2id on successful login.
     if (needsRehash(user.password_hash)) {
@@ -165,10 +196,14 @@ router.post("/login", async (req: Request, res: Response, next: NextFunction) =>
       workspaceId: chosen.id,
       role: m.ws_role,
       orgRole: m.org_role,
+      username: user.username,
+      email: user.email,
+      name: user.name,
     });
     return res.json({
       accessToken,
-      user: { id: user.id, email: user.email, name: user.name },
+      user: { id: user.id, email: user.email, name: user.name, username: user.username },
+      organization: { id: m.tenant_id, name: m.org_name },
       workspace: { id: chosen.id, name: chosen.name },
       role: m.ws_role,
       orgRole: m.org_role,
@@ -186,15 +221,16 @@ router.post("/token/refresh", async (req: Request, res: Response, next: NextFunc
 
     const rotated = await sessionService.rotateSession(presented);
     if (!rotated) {
-      clearRefreshCookie(res);
+      clearRefreshCookie(req, res);
       return res.status(401).json({ message: "Invalid or expired session" });
     }
     const m = await getWorkspaceMembership(rotated.userId, rotated.activeWorkspaceId);
     if (!m) {
-      clearRefreshCookie(res);
+      clearRefreshCookie(req, res);
       return res.status(401).json({ message: "Workspace membership missing" });
     }
-    setRefreshCookie(res, rotated.refreshToken);
+    setRefreshCookie(req, res,rotated.refreshToken);
+    const me = await findUserById(rotated.userId);
     const accessToken = signAccessToken({
       userId: rotated.userId,
       tenantId: m.tenant_id,
@@ -202,6 +238,44 @@ router.post("/token/refresh", async (req: Request, res: Response, next: NextFunc
       role: m.ws_role,
       orgRole: m.org_role,
       sessionId: rotated.sessionId,
+      username: me?.username,
+      email: me?.email,
+      name: me?.name,
+    });
+    return res.json({ accessToken });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /auth/token/renew — SSO silent renew. Validates the session WITHOUT rotating
+// the refresh token and mints a fresh access token. Product frontends call this on a
+// 401 (using the shared central session cookie); non-rotating so concurrent renews
+// from multiple products/tabs can't trip reuse-detection. No new cookie is set.
+router.post("/token/renew", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const presented = req.cookies && (req.cookies[REFRESH_COOKIE] as string | undefined);
+    if (!presented) return res.status(401).json({ message: "Missing session" });
+
+    const session = await sessionService.validateSession(presented);
+    if (!session) {
+      clearRefreshCookie(req, res);
+      return res.status(401).json({ message: "Invalid or expired session" });
+    }
+    const m = await getWorkspaceMembership(session.userId, session.activeWorkspaceId);
+    if (!m) return res.status(401).json({ message: "Workspace membership missing" });
+
+    const me = await findUserById(session.userId);
+    const accessToken = signAccessToken({
+      userId: session.userId,
+      tenantId: m.tenant_id,
+      workspaceId: session.activeWorkspaceId,
+      role: m.ws_role,
+      orgRole: m.org_role,
+      sessionId: session.sessionId,
+      username: me?.username,
+      email: me?.email,
+      name: me?.name,
     });
     return res.json({ accessToken });
   } catch (err) {
@@ -218,6 +292,8 @@ router.post("/switch-workspace", requireAuth(), async (req: Request, res: Respon
     const m = await getWorkspaceMembership(req.user!.userId, workspaceId as string);
     if (!m) return res.status(403).json({ message: "Not a member of that workspace" });
     await sessionService.setActiveWorkspace(req.user!.sessionId, workspaceId as string);
+    const chosen = (await listUserWorkspaces(req.user!.userId)).find((w) => w.id === workspaceId);
+    const me = await findUserById(req.user!.userId);
     const accessToken = signAccessToken({
       userId: req.user!.userId,
       tenantId: m.tenant_id,
@@ -225,8 +301,17 @@ router.post("/switch-workspace", requireAuth(), async (req: Request, res: Respon
       role: m.ws_role,
       orgRole: m.org_role,
       sessionId: req.user!.sessionId,
+      username: me?.username,
+      email: me?.email,
+      name: me?.name,
     });
-    return res.json({ accessToken, workspace: { id: workspaceId }, role: m.ws_role, orgRole: m.org_role });
+    return res.json({
+      accessToken,
+      organization: { id: m.tenant_id, name: m.org_name },
+      workspace: { id: workspaceId, name: chosen?.name },
+      role: m.ws_role,
+      orgRole: m.org_role,
+    });
   } catch (err) {
     next(err);
   }
@@ -236,7 +321,7 @@ router.post("/switch-workspace", requireAuth(), async (req: Request, res: Respon
 router.post("/logout", requireAuth(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await sessionService.revokeSession(req.user!.sessionId);
-    clearRefreshCookie(res);
+    clearRefreshCookie(req, res);
     return res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -247,7 +332,7 @@ router.post("/logout", requireAuth(), async (req: Request, res: Response, next: 
 router.post("/logout-all", requireAuth(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await sessionService.revokeAllSessions(req.user!.userId);
-    clearRefreshCookie(res);
+    clearRefreshCookie(req, res);
     return res.json({ ok: true });
   } catch (err) {
     next(err);

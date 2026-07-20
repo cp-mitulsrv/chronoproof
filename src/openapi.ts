@@ -29,20 +29,26 @@ const openapi = {
       Error: { type: "object", properties: { message: { type: "string" } } },
       RegisterRequest: {
         type: "object",
-        required: ["email", "password", "name", "organizationName"],
+        required: ["email", "password", "name", "username", "organizationName"],
         properties: {
           email: { type: "string", format: "email" },
           password: { type: "string", format: "password", minLength: 8 },
           name: { type: "string" },
-          organizationName: { type: "string", description: "Creates the tenant" },
+          username: {
+            type: "string",
+            pattern: "^[a-z0-9_]{3,30}$",
+            description: "Unique login handle: 3-30 chars, lowercase letters/numbers/underscore",
+          },
+          organizationName: { type: "string", description: "Creates the organisation (tenant)" },
           workspaceName: { type: "string", description: "First workspace (default 'Default')" },
         },
       },
       AuthResult: {
         type: "object",
         properties: {
-          accessToken: { type: "string", description: "RS256 JWT, ~15 min" },
+          accessToken: { type: "string", description: "RS256 JWT (~15 min). Carries a `uname` claim." },
           user: { $ref: "#/components/schemas/User" },
+          organization: { $ref: "#/components/schemas/OrganizationRef" },
           workspace: { $ref: "#/components/schemas/WorkspaceRef" },
           role: { type: "string", enum: ["owner", "member"] },
           orgRole: { type: "string", enum: ["owner", "admin", "member"] },
@@ -50,10 +56,12 @@ const openapi = {
       },
       LoginRequest: {
         type: "object",
-        required: ["email", "password"],
+        required: ["identifier", "password"],
         properties: {
-          email: { type: "string", format: "email" },
+          identifier: { type: "string", description: "Email OR username" },
           password: { type: "string", format: "password" },
+          email: { type: "string", format: "email", description: "Back-compat alias for identifier" },
+          username: { type: "string", description: "Back-compat alias for identifier" },
           workspaceId: {
             type: "string",
             format: "uuid",
@@ -79,7 +87,12 @@ const openapi = {
           id: { type: "string", format: "uuid" },
           email: { type: "string", format: "email" },
           name: { type: "string" },
+          username: { type: "string", nullable: true },
         },
+      },
+      OrganizationRef: {
+        type: "object",
+        properties: { id: { type: "string", format: "uuid" }, name: { type: "string" } },
       },
       WorkspaceRef: {
         type: "object",

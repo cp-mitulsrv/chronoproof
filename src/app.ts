@@ -10,6 +10,7 @@ import { router as wellKnownRouter } from "./jwks/wellKnown.js";
 import authRouter from "./routes/auth.js";
 import workspacesRouter from "./routes/workspaces.js";
 import invitationsRouter from "./routes/invitations.js";
+import usersRouter from "./routes/users.js";
 import type { Request, Response, NextFunction } from "express";
 
 export function buildApp() {
@@ -40,11 +41,15 @@ export function buildApp() {
   app.use("/auth/register", authLimiter);
   app.use("/auth/login", authLimiter);
   app.use("/auth/token/refresh", authLimiter);
+  app.use("/auth/token/renew", authLimiter);
   app.use("/auth", authRouter);
 
   // Workspaces & members; invitations (invite + accept).
   app.use("/workspaces", workspacesRouter);
   app.use("/", invitationsRouter);
+
+  // Users API — how product services resolve identity from the central user store.
+  app.use("/users", usersRouter);
 
   // JSON 404 + centralized error handler.
   app.use((req: Request, res: Response) => res.status(404).json({ message: "Not found" }));

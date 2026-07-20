@@ -16,14 +16,15 @@ interface SeedUser {
   email: string;
   password: string;
   name: string;
+  username: string;
   orgRole: "owner" | "admin" | "member";
   wsRole: "owner" | "member";
 }
 
 const USERS: SeedUser[] = [
-  { email: "owner@chronoproof.test", password: "Owner@12345", name: "Test Owner", orgRole: "owner", wsRole: "owner" },
-  { email: "admin@chronoproof.test", password: "Admin@12345", name: "Test Admin", orgRole: "admin", wsRole: "member" },
-  { email: "member@chronoproof.test", password: "Member@12345", name: "Test Member", orgRole: "member", wsRole: "member" },
+  { email: "owner@chronoproof.test", password: "Owner@12345", name: "Test Owner", username: "owner", orgRole: "owner", wsRole: "owner" },
+  { email: "admin@chronoproof.test", password: "Admin@12345", name: "Test Admin", username: "admin", orgRole: "admin", wsRole: "member" },
+  { email: "member@chronoproof.test", password: "Member@12345", name: "Test Member", username: "member", orgRole: "member", wsRole: "member" },
 ];
 
 async function main(): Promise<void> {
@@ -78,7 +79,8 @@ async function main(): Promise<void> {
         .input("email", sql.NVarChar(320), u.email)
         .input("hash", sql.NVarChar(sql.MAX), hash)
         .input("name", sql.NVarChar(200), u.name)
-        .query<{ id: string }>(`INSERT INTO dbo.users (email, password_hash, name) OUTPUT INSERTED.id VALUES (@email, @hash, @name)`)
+        .input("username", sql.NVarChar(50), u.username)
+        .query<{ id: string }>(`INSERT INTO dbo.users (email, password_hash, name, username) OUTPUT INSERTED.id VALUES (@email, @hash, @name, @username)`)
     ).recordset[0].id;
 
     await pool.request()

@@ -124,7 +124,7 @@ router.post("/invitations/accept", async (req: Request, res: Response, next: Nex
           .input("hash", sql.NVarChar(sql.MAX), hash)
           .input("name", sql.NVarChar(200), name as string)
           .query<{ id: string }>(`INSERT INTO dbo.users (email, password_hash, name) OUTPUT INSERTED.id VALUES (@email, @hash, @name)`);
-        user = { id: u.recordset[0].id, email: inv.email, name: name as string, password_hash: hash, created_at: new Date() };
+        user = { id: u.recordset[0].id, email: inv.email, name: name as string, username: null, password_hash: hash, created_at: new Date() };
       }
       await new sql.Request(tx)
         .input("uid", sql.UniqueIdentifier, user.id)
