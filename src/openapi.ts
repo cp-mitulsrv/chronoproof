@@ -17,6 +17,7 @@ const openapi = {
   servers: [{ url: "/", description: "This server" }],
   tags: [
     { name: "auth", description: "Registration, login, sessions" },
+    { name: "users", description: "Identity lookup (how product services resolve users)" },
     { name: "workspaces", description: "Workspaces & members" },
     { name: "invitations", description: "Invite & accept" },
     { name: "well-known", description: "Public keys" },
@@ -29,20 +30,26 @@ const openapi = {
       Error: { type: "object", properties: { message: { type: "string" } } },
       RegisterRequest: {
         type: "object",
-        required: ["email", "password", "name", "organizationName"],
+        required: ["email", "password", "name", "username", "organizationName"],
         properties: {
           email: { type: "string", format: "email" },
           password: { type: "string", format: "password", minLength: 8 },
           name: { type: "string" },
-          organizationName: { type: "string", description: "Creates the tenant" },
+          username: {
+            type: "string",
+            pattern: "^[a-z0-9_]{3,30}$",
+            description: "Unique login handle: 3-30 chars, lowercase letters/numbers/underscore",
+          },
+          organizationName: { type: "string", description: "Creates the organisation (tenant)" },
           workspaceName: { type: "string", description: "First workspace (default 'Default')" },
         },
       },
       AuthResult: {
         type: "object",
         properties: {
-          accessToken: { type: "string", description: "RS256 JWT, ~15 min" },
+          accessToken: { type: "string", description: "RS256 JWT (~15 min). Carries a `uname` claim." },
           user: { $ref: "#/components/schemas/User" },
+          organization: { $ref: "#/components/schemas/OrganizationRef" },
           workspace: { $ref: "#/components/schemas/WorkspaceRef" },
           role: { type: "string", enum: ["owner", "member"] },
           orgRole: { type: "string", enum: ["owner", "admin", "member"] },
@@ -50,10 +57,12 @@ const openapi = {
       },
       LoginRequest: {
         type: "object",
-        required: ["email", "password"],
+        required: ["identifier", "password"],
         properties: {
-          email: { type: "string", format: "email" },
+          identifier: { type: "string", description: "Email OR username" },
           password: { type: "string", format: "password" },
+          email: { type: "string", format: "email", description: "Back-compat alias for identifier" },
+          username: { type: "string", description: "Back-compat alias for identifier" },
           workspaceId: {
             type: "string",
             format: "uuid",
@@ -79,7 +88,25 @@ const openapi = {
           id: { type: "string", format: "uuid" },
           email: { type: "string", format: "email" },
           name: { type: "string" },
+          username: { type: "string", nullable: true },
         },
+      },
+      Me: {
+        type: "object",
+        properties: {
+          id: { type: "string", format: "uuid" },
+          email: { type: "string", format: "email" },
+          name: { type: "string" },
+          username: { type: "string", nullable: true },
+          tenantId: { type: "string", format: "uuid" },
+          workspaceId: { type: "string", format: "uuid" },
+          role: { type: "string", enum: ["owner", "member"] },
+          orgRole: { type: "string", enum: ["owner", "admin", "member"] },
+        },
+      },
+      OrganizationRef: {
+        type: "object",
+        properties: { id: { type: "string", format: "uuid" }, name: { type: "string" } },
       },
       WorkspaceRef: {
         type: "object",
@@ -189,6 +216,36 @@ const openapi = {
     },
     "/auth/logout-all": {
       post: { tags: ["auth"], security: [{ bearerAuth: [] }], summary: "Revoke all of the user's sessions", responses: { 200: { description: "OK" } } },
+    },
+    "/users/me": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "The caller's own identity (email, name) — read straight from the token + central DB",
+        responses: {
+          200: { description: "Identity", content: { "application/json": { schema: { $ref: "#/components/schemas/Me" } } } },
+          401: { description: "Missing/invalid token" },
+          404: { description: "User not found" },
+        },
+      },
+    },
+    "/users": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "Batch-resolve public profiles within the caller's org",
+        parameters: [{ name: "ids", in: "query", required: true, schema: { type: "string" }, description: "Comma-separated user UUIDs (max 200)" }],
+        responses: { 200: { description: "Users", content: { "application/json": { schema: { type: "object", properties: { users: { type: "array", items: { $ref: "#/components/schemas/User" } } } } } } } },
+      },
+    },
+    "/users/{id}": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "A single user's public profile (only within the caller's org)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: { 200: { description: "User", content: { "application/json": { schema: { $ref: "#/components/schemas/User" } } } }, 404: { description: "User not found" } },
+      },
     },
     "/workspaces": {
       get: {
