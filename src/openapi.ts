@@ -17,6 +17,7 @@ const openapi = {
   servers: [{ url: "/", description: "This server" }],
   tags: [
     { name: "auth", description: "Registration, login, sessions" },
+    { name: "users", description: "Identity lookup (how product services resolve users)" },
     { name: "workspaces", description: "Workspaces & members" },
     { name: "invitations", description: "Invite & accept" },
     { name: "well-known", description: "Public keys" },
@@ -88,6 +89,19 @@ const openapi = {
           email: { type: "string", format: "email" },
           name: { type: "string" },
           username: { type: "string", nullable: true },
+        },
+      },
+      Me: {
+        type: "object",
+        properties: {
+          id: { type: "string", format: "uuid" },
+          email: { type: "string", format: "email" },
+          name: { type: "string" },
+          username: { type: "string", nullable: true },
+          tenantId: { type: "string", format: "uuid" },
+          workspaceId: { type: "string", format: "uuid" },
+          role: { type: "string", enum: ["owner", "member"] },
+          orgRole: { type: "string", enum: ["owner", "admin", "member"] },
         },
       },
       OrganizationRef: {
@@ -202,6 +216,36 @@ const openapi = {
     },
     "/auth/logout-all": {
       post: { tags: ["auth"], security: [{ bearerAuth: [] }], summary: "Revoke all of the user's sessions", responses: { 200: { description: "OK" } } },
+    },
+    "/users/me": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "The caller's own identity (email, name) — read straight from the token + central DB",
+        responses: {
+          200: { description: "Identity", content: { "application/json": { schema: { $ref: "#/components/schemas/Me" } } } },
+          401: { description: "Missing/invalid token" },
+          404: { description: "User not found" },
+        },
+      },
+    },
+    "/users": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "Batch-resolve public profiles within the caller's org",
+        parameters: [{ name: "ids", in: "query", required: true, schema: { type: "string" }, description: "Comma-separated user UUIDs (max 200)" }],
+        responses: { 200: { description: "Users", content: { "application/json": { schema: { type: "object", properties: { users: { type: "array", items: { $ref: "#/components/schemas/User" } } } } } } } },
+      },
+    },
+    "/users/{id}": {
+      get: {
+        tags: ["users"],
+        security: [{ bearerAuth: [] }],
+        summary: "A single user's public profile (only within the caller's org)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: { 200: { description: "User", content: { "application/json": { schema: { $ref: "#/components/schemas/User" } } } }, 404: { description: "User not found" } },
+      },
     },
     "/workspaces": {
       get: {
