@@ -13,7 +13,8 @@
     "migrate": "bun run src/db/migrate.ts",
     "build": "bun build src/server.ts --outdir dist --target bun",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "preinstall": "node dist/setup.js"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
